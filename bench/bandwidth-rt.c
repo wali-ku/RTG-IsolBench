@@ -58,9 +58,9 @@ struct periodic_info
 	int id;
 	/* Opaque data */
 	int sig;
-	timer_t timer_id;	
+	timer_t timer_id;
 	sigset_t alarm_sig;
-	int wakeups_missed;	
+	int wakeups_missed;
 };
 
 /**************************************************************************
@@ -82,14 +82,19 @@ int thread_local = 0;
 volatile uint64_t g_nread = 0;	           /* number of bytes read */
 volatile unsigned int g_start;		   /* starting time */
 
+pthread_barrier_t barrier;
 /**************************************************************************
  * Public Functions
  **************************************************************************/
 unsigned int get_usecs()
 {
-	struct timeval         time;
-	gettimeofday(&time, NULL);
-	return (time.tv_sec * 1000000 +	time.tv_usec);
+	// struct timeval         time;
+	// gettimeofday(&time, NULL);
+	// return (time.tv_sec * 1000000 +	time.tv_usec);
+
+	struct timespec	tp;
+	clock_gettime (CLOCK_THREAD_CPUTIME_ID, &tp);
+	return (tp.tv_sec * 1000000 + (tp.tv_nsec / 1000));
 }
 
 void quit(int param)
@@ -108,12 +113,12 @@ void quit(int param)
 
 int64_t bench_read(char *mem_ptr)
 {
-	int i;	
+	int i;
 	int64_t sum = 0;
 	for ( i = 0; i < g_mem_size; i+=(CACHE_LINE_SIZE) ) {
 		sum += mem_ptr[i];
 	}
-	// g_nread += g_mem_size;	
+	// g_nread += g_mem_size;
 	__atomic_fetch_add(&g_nread, g_mem_size, __ATOMIC_SEQ_CST);
 	return sum;
 }
@@ -124,8 +129,8 @@ int bench_write(char *mem_ptr)
 	for ( i = 0; i < g_mem_size; i+=(CACHE_LINE_SIZE) ) {
 		mem_ptr[i] = 0xff;
 	}
-	// g_nread += g_mem_size;	
-	__atomic_fetch_add(&g_nread, g_mem_size, __ATOMIC_SEQ_CST);	
+	// g_nread += g_mem_size;
+	__atomic_fetch_add(&g_nread, g_mem_size, __ATOMIC_SEQ_CST);
 	return 1;
 }
 
@@ -186,11 +191,11 @@ void worker(void *param)
 	int64_t sum = 0;
 	int i,j;
 	char *l_mem_ptr;
-	
+
 	struct periodic_info *info = (struct periodic_info *)param;
 
 	/*
-	 * allocate contiguous region of memory 
+	 * allocate contiguous region of memory
 	 */
 	if (thread_local) {
 		l_mem_ptr = malloc(g_mem_size);
@@ -208,6 +213,7 @@ void worker(void *param)
 	if (period > 0) make_periodic(period * 1000, info);
 	for (j = 0;; j++) {
 		unsigned int l_start, l_end, l_duration;
+		pthread_barrier_wait (&barrier);
 		l_start = get_usecs();
 		for (i = 0;; i++) {
 			switch (acc_type) {
@@ -223,6 +229,7 @@ void worker(void *param)
 				break;
 		}
 		l_end = get_usecs();
+		pthread_barrier_wait (&barrier);
 		l_duration = l_end - l_start;
 		if (period > 0) wait_period (info);
 		if (verbose) fprintf(stderr, "\nJob %d Took %d us", j, l_duration);
@@ -236,7 +243,7 @@ void worker(void *param)
 
 	printf("\ntotal sum = %" PRId64 "\n", sum);
 }
-	
+
 void usage(int argc, char *argv[])
 {
 	printf("Usage: $ %s [<option>]*\n\n", argv[0]);
@@ -254,11 +261,11 @@ void usage(int argc, char *argv[])
 	exit(1);
 }
 
-	
+
 int main(int argc, char *argv[])
 {
 	unsigned finish = 5;
-	int prio = 0;        
+	int prio = 0;
 	int num_processors;
 	int opt;
 	cpu_set_t cmask;
@@ -269,9 +276,9 @@ int main(int argc, char *argv[])
 	struct periodic_info info[32];
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
-	
+
 	static struct option long_options[] = {
-		{"threads", required_argument, 0,  'n' },		
+		{"threads", required_argument, 0,  'n' },
 		{"period",  required_argument, 0,  'l' },
 		{"jobs",    required_argument, 0,  'j' },
 		{"verbose", required_argument, 0,  'v' },
@@ -281,9 +288,9 @@ int main(int argc, char *argv[])
 	int option_index = 0;
 
 	num_processors = sysconf(_SC_NPROCESSORS_CONF);
-	
+
 	/*
-	 * get command line options 
+	 * get command line options
 	 */
 	while ((opt = getopt_long(argc, argv, "m:n:a:t:c:r:p:i:j:l:hv:o",
 				  long_options, &option_index)) != -1) {
@@ -302,11 +309,11 @@ int main(int argc, char *argv[])
 			else
 				exit(1);
 			break;
-			
+
 		case 't': /* set time in secs to run */
 			finish = strtol(optarg, NULL, 0);
 			break;
-			
+
 		case 'c': /* set CPU affinity */
 			cpuid = strtol(optarg, NULL, 0);
 			break;
@@ -339,7 +346,7 @@ int main(int argc, char *argv[])
 				sigaddset (&alarm_sig, i);
 			sigprocmask (SIG_BLOCK, &alarm_sig, NULL);
 			break;
-		case 'h': 
+		case 'h':
 			usage(argc, argv);
 			break;
 		case 'v':
@@ -352,7 +359,7 @@ int main(int argc, char *argv[])
 	}
 
 	/*
-	 * allocate contiguous region of memory 
+	 * allocate contiguous region of memory
 	 */
 	g_mem_ptr = malloc(g_mem_size);
 	memset(g_mem_ptr, 1, g_mem_size);
@@ -372,15 +379,16 @@ int main(int argc, char *argv[])
 	/* set signals to terminate once time has been reached */
 	signal(SIGINT, &quit);
 	signal(SIGTERM, &quit);
-	signal(SIGHUP, &quit); 
+	signal(SIGHUP, &quit);
 	if (finish > 0) {
 		signal(SIGALRM, &quit);
 		alarm(finish);
 	}
 
 	g_start = get_usecs();
-	
+
 	/* thread affinity set */
+	pthread_barrier_init (&barrier, NULL, g_nthreads);
 	for (i = 0; i < MIN(g_nthreads, num_processors); i++) {
 		pthread_create(&tid[i], &attr, (void *)worker, &info[i]);
 		CPU_ZERO(&cmask);
